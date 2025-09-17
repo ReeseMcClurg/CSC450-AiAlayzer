@@ -1,0 +1,31 @@
+# Build outputs
+target/
+out/
+bin/
+build/
+
+# IDE/editor files
+.idea/
+*.iml
+.vscode/
+.project
+.classpath
+.settings/
+.factorypath
+.vs/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Logs and reports
+*.log
+jacoco.exec
+site/
+
+# Java crash logs
+hs_err_pid*
+replay_pid*
+
+# Environment files
+.env
