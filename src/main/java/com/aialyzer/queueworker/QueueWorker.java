@@ -34,7 +34,8 @@ public class QueueWorker {
     // Grab some due tasks
     try (PreparedStatement ps = cx.prepareStatement(
         "select id,path,kind from scan_queue " +
-        "where not_before_unix<=? order by kind, id limit ?")) {
+        "where not_before_unix<=? order by not_before_unix, kind, id limit ?")) {
+
       ps.setLong(1, now); ps.setInt(2, batchSize);
       try (ResultSet rs = ps.executeQuery()) {
         boolean didWork = false;
@@ -122,24 +123,24 @@ public class QueueWorker {
     long mtime = a.lastModifiedTime().toMillis() / 1000L;
     long ctime = a.creationTime() != null ? a.creationTime().toMillis() / 1000L : 0L;
     String mime = safeProbeContentType(p);
-    String typeLabel = null;
     String ext = fileExtLower(p);
 
     // Store file row
     if (mime == null && "txt".equals(ext)) mime = "text/plain";
 
     try (PreparedStatement ps = cx.prepareStatement(
-        "insert into files(path,parent_path,size_bytes,mtime_unix,ctime_unix,last_scanned_unix,content_hash,kind,type_label) " +
-        "values(?,?,?,?,?,?,?,?,?) " +
-        "on conflict(path) do update set " +
-        "parent_path=excluded.parent_path, " +
-        "size_bytes=excluded.size_bytes, " +
-        "mtime_unix=excluded.mtime_unix, " +
-        "ctime_unix=excluded.ctime_unix, " +
-        "last_scanned_unix=excluded.last_scanned_unix, " +
-        "kind=excluded.kind, " +
-        "type_label=excluded.type_label, " +
-         "ext=excluded.ext"
+         "insert into files(" +
+          "  path,parent_path,size_bytes,mtime_unix,ctime_unix,last_scanned_unix,content_hash,kind,type_label,ext" +
+          ") values (?,?,?,?,?,?,?,?,?,?) " +
+          "on conflict(path) do update set " +
+          "  parent_path=excluded.parent_path, " +
+          "  size_bytes=excluded.size_bytes, " +
+          "  mtime_unix=excluded.mtime_unix, " +
+          "  ctime_unix=excluded.ctime_unix, " +
+          "  last_scanned_unix=excluded.last_scanned_unix, " +
+          "  kind=excluded.kind, " +
+          "  type_label=excluded.type_label, " +
+          "  ext=excluded.ext"
         )) {
       ps.setString(1, pathStr);
       ps.setString(2, parent);
@@ -149,7 +150,7 @@ public class QueueWorker {
       ps.setLong  (6, now);
       ps.setObject(7, null);
       ps.setString(8, mime);
-      ps.setObject(9, typeLabel);
+      ps.setObject(9, null);
       ps.setString(10, ext);
       ps.executeUpdate();
     }
@@ -185,6 +186,26 @@ public class QueueWorker {
       }
     } catch (IOException ignore) {
     }
+
+
+    if (width != null && height != null) {
+      try (PreparedStatement ps = cx.prepareStatement(
+          "insert into image_meta(path,width,height,exif_taken_unix,camera_make,camera_model) " +
+          "values (?,?,?,?,?,?) " +
+          "on conflict(path) do update set " +
+          "  width=excluded.width, " +
+          "  height=excluded.height"
+      )) {
+        ps.setString(1, pathStr);
+        ps.setObject(2, width);
+        ps.setObject(3, height);
+        ps.setObject(4, null);
+        ps.setObject(5, null);   // camera_make
+        ps.setObject(6, null);   // camera_model
+        ps.executeUpdate();
+      }
+    }
+
 
     // caps reading on files larger than 256mb to avoid for passive mode
     String sha256 = null;

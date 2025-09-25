@@ -130,6 +130,9 @@ public final class Main {
 
     private static void ensureSchema(Connection cx) throws SQLException {
         try (Statement st = cx.createStatement()) {
+            st.execute("PRAGMA foreign_keys=ON");
+            st.execute("PRAGMA journal_mode=WAL");
+            st.execute("PRAGMA synchronous=NORMAL");
             st.executeUpdate("""
                     create table if not exists files (
                       id                integer primary key,
