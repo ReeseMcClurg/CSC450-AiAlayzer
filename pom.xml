@@ -34,7 +34,7 @@
                     <archive>
                         <manifest>
                             <addClasspath>true</addClasspath>
-                            <mainClass>com.aialyzer.main.Main</mainClass>
+                            <mainClass>com.aialyzer.Main</mainClass>
                         </manifest>
                     </archive>
                 </configuration>
@@ -44,7 +44,7 @@
                 <artifactId>exec-maven-plugin</artifactId>
                 <version>3.1.0</version>
                 <configuration>
-                    <mainClass>com.aialyzer.main.Main</mainClass>
+                    <mainClass>com.aialyzer.Main</mainClass>
                 </configuration>
             </plugin>
         </plugins>
