@@ -30,28 +30,57 @@ public class QueueWorker {
   }
 
   public void runOnce() throws Exception {
-    final long now = Instant.now().getEpochSecond();
-    // Grab some due tasks
-    try (PreparedStatement ps = cx.prepareStatement(
-        "select id,path,kind from scan_queue " +
-        "where not_before_unix<=? order by not_before_unix, kind, id limit ?")) {
+  final long now = Instant.now().getEpochSecond();
 
-      ps.setLong(1, now); ps.setInt(2, batchSize);
-      try (ResultSet rs = ps.executeQuery()) {
-        boolean didWork = false;
-        while (rs.next()) {
-          didWork = true;
-          int id = rs.getInt(1);
-          String path = rs.getString(2);
-          String kind = rs.getString(3);
-          boolean ok = handle(path, kind);
-          if (ok) deleteTask(id); else requeue(id);
-        }
-        if (!didWork) Thread.sleep(idleSleepMs); 
-        cx.commit();
+  
+  boolean prev = cx.getAutoCommit();
+  cx.setAutoCommit(true);
+
+  java.util.List<Integer> ids   = new java.util.ArrayList<>();
+  java.util.List<String>  paths = new java.util.ArrayList<>();
+  java.util.List<String>  kinds = new java.util.ArrayList<>();
+
+  try (PreparedStatement ps = cx.prepareStatement(
+      "select id,path,kind from scan_queue " +
+      "where not_before_unix<=? order by not_before_unix, kind, id limit ?")) {
+    ps.setLong(1, now);
+    ps.setInt(2, batchSize);
+    try (ResultSet rs = ps.executeQuery()) {
+      while (rs.next()) {
+        ids.add(rs.getInt(1));
+        paths.add(rs.getString(2));
+        kinds.add(rs.getString(3));
       }
-    } catch (Exception e) { cx.rollback(); throw e; }
+    }
   }
+
+  if (ids.isEmpty()) {
+    Thread.sleep(idleSleepMs);
+    return;
+  }
+
+
+  cx.setAutoCommit(false);
+  try {
+    for (int i = 0; i < ids.size(); i++) {
+      int id = ids.get(i);
+      String path = paths.get(i);
+      String kind = kinds.get(i);
+
+      boolean ok = handle(path, kind);
+      if (ok) deleteTask(id);
+      else    requeue(id);
+
+      if (passive) Thread.sleep(100); 
+    }
+    cx.commit();
+  } catch (Exception e) {
+    cx.rollback();
+    throw e;
+  } finally {
+    cx.setAutoCommit(prev); 
+  }
+}
 
   private boolean handle(String path, String kind) {
     try {

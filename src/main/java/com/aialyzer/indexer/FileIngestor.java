@@ -1,3 +1,4 @@
+//This is just a testing tool. It will be deleted in the final product.
 package com.aialyzer.indexer;
 
 import java.nio.file.*;
@@ -6,10 +7,9 @@ import java.time.Instant;
 
 public class FileIngestor {
 
-    public static void ingestFolder(Path root) throws Exception {
-        try (Connection cx = DatabaseManager.get()) {
-            cx.setAutoCommit(false);
-            long now = Instant.now().getEpochSecond();
+    public static void ingestFolder(Connection cx, Path root) throws Exception {
+        cx.setAutoCommit(false);
+        long now = Instant.now().getEpochSecond();
 
             String sql = """
                 INSERT INTO files (path, parent_path, size_bytes, mtime_unix, ctime_unix, last_scanned_unix, content_hash, kind, type_label)
@@ -48,7 +48,6 @@ public class FileIngestor {
 
             cx.commit();
         }
-    }
 
     private static String detectKind(Path file) {
         String name = file.getFileName() == null ? "" : file.getFileName().toString().toLowerCase();

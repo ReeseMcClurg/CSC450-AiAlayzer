@@ -7,9 +7,6 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.sql.Connection;
-import java.sql.DriverManager;
-import java.sql.SQLException;
-import java.sql.Statement;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
@@ -17,7 +14,14 @@ import java.util.stream.Collectors;
 
 public final class Main {
 
-    private record Config(String dbPath, boolean passive, boolean once, List<Path> roots) {}
+    private record Config(
+    String dbPath,
+    boolean passive,
+    boolean once,
+    List<Path> roots,
+    int threads,
+    int maxFps
+    ) {}
 
     public static void main(String[] args) {
         Config cfg = parseArgs(args);
@@ -36,45 +40,58 @@ public final class Main {
             if (dbDir != null) {
                 Files.createDirectories(dbDir);
             }
-
             Class.forName("org.sqlite.JDBC");
 
-            try (Connection cx = DriverManager.getConnection("jdbc:sqlite:" + dbFile)) {
-                cx.setAutoCommit(true);
-
-                try (Statement s = cx.createStatement()) {
-                    s.execute("PRAGMA foreign_keys=ON;");
-                    s.execute("PRAGMA journal_mode=WAL;");
-                    s.execute("PRAGMA synchronous=NORMAL;");
-                }
-
-                ensureSchema(cx);
+            try (Connection cx = com.aialyzer.indexer.DatabaseManager.open(dbFile)) {
 
                 if (!cfg.roots().isEmpty()) {
-                    System.out.println("Indexing roots...");
-                    new FsIndexer(cx).indexRoots(cfg.roots());
-                    System.out.println("Indexing complete.");
-                }
-
-                QueueWorker worker = new QueueWorker(cx, cfg.passive());
-
-                Runtime.getRuntime().addShutdownHook(new Thread(() -> {
-                    try {
-                        System.out.println("\nShutting down at " + Instant.now());
-                        cx.close();
-                    } catch (Exception ignore) {
-                    }
-                }));
-
-                if (cfg.once()) {
-                    worker.runOnce();
-                    System.out.println("runOnce() complete.");
-                } else {
-                    System.out.println("Starting worker loop at " + Instant.now());
-                    while (!Thread.currentThread().isInterrupted()) {
-                        worker.runOnce();
+                    if (!cfg.passive()) {
+                        System.out.println("Active full crawl...");
+                        new com.aialyzer.indexer.ActiveScanner(cx, cfg.roots(), cfg.threads(), 8192, 800).run();
+                        System.out.println("Active crawl complete.");
+                    } else {
+                        System.out.println("Indexing roots...");
+                        new FsIndexer(cx).indexRoots(cfg.roots());
+                        System.out.println("Indexing complete.");
                     }
                 }
+
+        Connection cxScan = null;
+        com.aialyzer.indexer.PassiveScanner passiveScanner = null;
+        try {
+            if (cfg.passive() && !cfg.once() && !cfg.roots().isEmpty()) {
+                cxScan = com.aialyzer.indexer.DatabaseManager.open(dbFile);
+                passiveScanner = new com.aialyzer.indexer.PassiveScanner(cxScan, cfg.roots(), cfg.maxFps());
+                passiveScanner.startAsync();
+                System.out.println("PassiveScanner started (background, max-fps=" + cfg.maxFps() + ").");
+            }
+        } catch (Exception e) {
+            System.out.println("PassiveScanner failed to start; continuing without watcher.");
+            e.printStackTrace();
+        }
+
+        QueueWorker worker = new QueueWorker(cx, cfg.passive());
+
+        final com.aialyzer.indexer.PassiveScanner psRef = passiveScanner;
+        final Connection scanConnRef = cxScan;
+
+        Runtime.getRuntime().addShutdownHook(new Thread(() -> {
+            try {
+                System.out.println("\nShutting down at " + Instant.now());
+                if (psRef != null) psRef.close();
+                if (scanConnRef != null && !scanConnRef.isClosed()) scanConnRef.close();
+            } catch (Exception ignore) { }
+        }));
+
+        if (cfg.once()) {
+            worker.runOnce();
+            System.out.println("runOnce() complete.");
+        } else {
+            System.out.println("Starting worker loop at " + Instant.now());
+            while (!Thread.currentThread().isInterrupted()) {
+                worker.runOnce();
+            }
+        }
             }
         } catch (Exception e) {
             e.printStackTrace();
@@ -88,123 +105,61 @@ public final class Main {
         boolean once = false;
         List<Path> roots = new ArrayList<>();
 
+        int threads = Math.max(2, Runtime.getRuntime().availableProcessors());
+        int maxFps  = 40; // passive trickle default
+
         for (int i = 0; i < args.length; i++) {
             switch (args[i]) {
                 case "--db" -> {
-                    if (i + 1 < args.length) {
-                        dbPath = args[++i];
-                    }
+                    if (i + 1 < args.length) dbPath = args[++i];
                 }
                 case "--active" -> passive = false;
                 case "--passive" -> passive = true;
                 case "--once" -> once = true;
                 case "--root" -> {
+                   if (i + 1 < args.length) roots.add(Paths.get(args[++i]));
+                }
+                case "--threads" -> {
                     if (i + 1 < args.length) {
-                        roots.add(Paths.get(args[++i]));
+                        try {
+                            threads = Math.max(1, Integer.parseInt(args[++i]));
+                        } catch (NumberFormatException ignore) {}
+                    }
+                }
+                case "--max-fps" -> {
+                    if (i + 1 < args.length) {
+                        try {
+                            maxFps = Math.max(1, Integer.parseInt(args[++i]));
+                        } catch (NumberFormatException ignore) {}
                     }
                 }
                 case "--help", "-h" -> {
                     printHelp();
                     System.exit(0);
                 }
-                default -> {
-                }
-            }
+                default -> { /* ignore */ }
+        }
         }
 
-        return new Config(dbPath, passive, once, roots);
+        return new Config(dbPath, passive, once, roots, threads, maxFps);
     }
+
 
     private static void printHelp() {
         System.out.println("""
-                Usage: java -jar aialyzer.jar [options]
+            Usage: java -jar aialyzer.jar [options]
 
-                  --db <path>        The file path for SQLite (default is: data/app.db)
-                  --root <dir>       Adds a root to index (maps file system)
-                  --active           Run worker in active mode (bigger batches)
-                  --passive          Run worker in passive mode (default, small batch)
-                  --once             Runs the worker once then exits
-                  --help             Show help
-                """);
-    }
+              --db <path>        The file path for SQLite (default: data/app.db)
+              --root <dir>       Adds a root to index (can repeat)
+              --active           Run worker in active mode (bigger batches)
+              --passive          Run worker in passive mode (default, small batch)
+              --once             Runs the worker once then exits
 
-    private static void ensureSchema(Connection cx) throws SQLException {
-        try (Statement st = cx.createStatement()) {
-            st.execute("PRAGMA foreign_keys=ON");
-            st.execute("PRAGMA journal_mode=WAL");
-            st.execute("PRAGMA synchronous=NORMAL");
-            st.executeUpdate("""
-                    create table if not exists files (
-                      id                integer primary key,
-                      path              text unique not null,
-                      parent_path       text not null,
-                      size_bytes        integer not null,
-                      mtime_unix        integer not null,
-                      ctime_unix        integer,
-                      last_scanned_unix integer not null,
-                      content_hash      text,
-                      kind              text,
-                      type_label        text,
-                      type_label_confidence real,
-                      type_label_source text,
-                      type_label_updated_unix integer,
-                      ext               text
-                    );
-                    """);
+              # New (optional):
+              --threads <n>      Active mode: number of scan threads (default: CPU cores)
+              --max-fps <n>      Passive mode: trickle crawl files/sec budget (default: 40)
 
-            st.executeUpdate("""
-                    create table if not exists scan_queue (
-                      id               integer primary key,
-                      path             text not null,
-                      kind             text not null,
-                      not_before_unix  integer not null,
-                      attempts         integer not null default 0,
-                      unique(path, kind)
-                    );
-                    """);
-
-            st.executeUpdate("""
-                    create table if not exists image_meta (
-                      path            text primary key references files(path) on delete cascade,
-                      width           integer,
-                      height          integer,
-                      exif_taken_unix integer,
-                      camera_make     text,
-                      camera_model    text
-                    );
-                    """);
-
-            st.executeUpdate("""
-                    create table if not exists label_history (
-                      id               integer primary key,
-                      path             text not null,
-                      label            text,
-                      confidence       real,
-                      source           text,
-                      created_unix     integer not null,
-                      foreign key(path) references files(path) on delete cascade
-                    );
-                    """);
-
-            st.executeUpdate("""
-                    create index if not exists ix_files_kind_parent_path_path
-                    on files(kind, parent_path, path);
-                    """);
-
-            st.executeUpdate("""
-                    create index if not exists ix_files_ext_parent_path_path
-                    on files(ext, parent_path, path);
-                    """);
-
-            st.executeUpdate("""
-                    create index if not exists ix_queue_due
-                    on scan_queue(not_before_unix, kind, id);
-                    """);
-
-            st.executeUpdate("""
-                    create index if not exists ix_files_parent
-                    on files(parent_path);
-                    """);
-        }
-    }
+              --help             Show help
+            """);
+    }  
 }
