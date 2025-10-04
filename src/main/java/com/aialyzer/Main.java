@@ -137,7 +137,7 @@ public final class Main {
                     printHelp();
                     System.exit(0);
                 }
-                default -> { /* ignore */ }
+                default -> {}
         }
         }
 

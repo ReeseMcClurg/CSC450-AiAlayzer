@@ -48,6 +48,13 @@ public final class DatabaseManager {
           ext               text
         );""");
 
+        try { st.executeUpdate("ALTER TABLE files ADD COLUMN ai_safety TEXT"); }
+        catch (SQLException ignore) { /* already exists */ }
+
+        try { st.executeUpdate("ALTER TABLE files ADD COLUMN ai_response TEXT"); }
+        catch (SQLException ignore) { /* already exists */ }
+
+
       st.executeUpdate("""
         create table if not exists scan_queue (
           id               integer primary key,
